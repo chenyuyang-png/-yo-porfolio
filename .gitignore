@@ -1,0 +1,26 @@
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Editor
+.vscode/
+.idea/
+*.sublime-*
+
+# Node (若未來想加 build 工具)
+node_modules/
+package-lock.json
+npm-debug.log
+
+# 個人匯出 / 備份檔（避免 commit 私人資料）
+portfolio_*.json
+backup_*.json
+*.local.html
+
+# 暫存
+*.tmp
+*.bak
+*.log
