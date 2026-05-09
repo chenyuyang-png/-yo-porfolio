@@ -229,7 +229,7 @@
     </div>
     <div class="field">
       <label>台幣現金</label>
-      <input type="number" id="cashTWD" step="1000" value="300000" style="width:120px;">
+      <input type="number" id="cashTWD" step="1000" value="0" style="width:120px;">
     </div>
     <div class="spacer"></div>
     <button class="btn primary" onclick="openAddModal()">➕ 新增持股</button>
@@ -237,6 +237,23 @@
     <button class="btn" onclick="loadData()">📂 還原儲存</button>
     <button class="btn danger" onclick="resetData()">🔄 還原預設</button>
     <button class="btn" onclick="exportJSON()">📥 匯出 JSON</button>
+    <button class="btn" onclick="document.getElementById('importFile').click()">📤 匯入 JSON</button>
+    <input type="file" id="importFile" accept="application/json,.json" style="display:none;" onchange="importJSON(event)">
+  </div>
+
+  <!-- 範本提示橫幅（使用者第一次開啟時顯示） -->
+  <div id="templateBanner" class="alert blue" style="margin-bottom: 18px; display:none;">
+    <span class="icon">📋</span>
+    <div class="body">
+      <b>範本模式：尚未輸入任何持股</b>
+      <p>這是一份公開的投資組合分析範本。請任選以下方式開始使用：</p>
+      <p style="margin-top:6px;">
+        <b>方式 1：</b>直接在「持股明細」表格中編輯股數、成本、現價，輸入完按右上「💾 儲存」<br>
+        <b>方式 2：</b>從另一台電腦匯出 JSON 檔，到這裡按「📤 匯入 JSON」一鍵載入所有資料<br>
+        <b>方式 3：</b>按「➕ 新增持股」加入您自己的標的
+      </p>
+      <p style="margin-top:6px; color:var(--text-2);">資料只儲存在您自己的瀏覽器 localStorage，不會上傳任何伺服器。重新整理頁面後仍會保留。</p>
+    </div>
   </div>
 
   <!-- KPI 總覽 -->
@@ -398,11 +415,11 @@
 
 const DEFAULT_STATE = {
   fxRate: 31.425,
-  cashTWD: 300000,
+  cashTWD: 0,
   stocks: [
     {
       id: 'TW-2327', market: 'TW', symbol: '2327', name: '國巨*',
-      shares: 1000, cost: 340.48, price: 389,
+      shares: 0, cost: 0, price: 389,
       sector: 'MLCC 被動元件',
       tags: ['被動元件', 'AI 伺服器', '集中度紅線'],
       memo: {
@@ -431,7 +448,7 @@ const DEFAULT_STATE = {
     },
     {
       id: 'US-NVDA', market: 'US', symbol: 'NVDA', name: 'Nvidia',
-      shares: 5, cost: 205.08, price: 215.20,
+      shares: 0, cost: 0, price: 215.20,
       sector: 'AI GPU',
       tags: ['AI GPU', 'Data Center', '5/20 法說'],
       memo: {
@@ -460,7 +477,7 @@ const DEFAULT_STATE = {
     },
     {
       id: 'US-NET', market: 'US', symbol: 'NET', name: 'Cloudflare',
-      shares: 14, cost: 214.376429, price: 196.13,
+      shares: 0, cost: 0, price: 196.13,
       sector: '邊緣運算 / SaaS',
       tags: ['SaaS', 'Workers AI', '虧損中'],
       memo: {
@@ -489,7 +506,7 @@ const DEFAULT_STATE = {
     },
     {
       id: 'US-LITE', market: 'US', symbol: 'LITE', name: 'Lumentum',
-      shares: 1, cost: 857.14, price: 903.88,
+      shares: 0, cost: 0, price: 903.88,
       sector: '光通訊 / AI 光元件',
       tags: ['800G/1.6T 光模組', 'CPO', 'NVDA 投資'],
       memo: {
@@ -517,7 +534,7 @@ const DEFAULT_STATE = {
     },
     {
       id: 'US-SNDK', market: 'US', symbol: 'SNDK', name: 'SanDisk',
-      shares: 1, cost: 1362.50, price: 1562.34,
+      shares: 0, cost: 0, price: 1562.34,
       sector: 'NAND Flash 儲存',
       tags: ['NAND Flash', 'Enterprise SSD', '過去一年 +3,314%'],
       memo: {
@@ -679,6 +696,29 @@ function exportJSON() {
   const a = document.createElement('a');
   a.href = url; a.download = 'portfolio_' + new Date().toISOString().slice(0,10) + '.json';
   a.click(); URL.revokeObjectURL(url);
+  showToast('📥 已匯出 JSON 檔案', 'green');
+}
+function importJSON(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (!data.stocks || !Array.isArray(data.stocks)) throw new Error('格式錯誤：缺少 stocks 陣列');
+      STATE = data;
+      // 同步介面控制項
+      document.getElementById('fxRate').value = STATE.fxRate;
+      document.getElementById('cashTWD').value = STATE.cashTWD;
+      refreshAll();
+      saveData();  // 自動儲存到 localStorage
+      showToast('📤 匯入成功並已儲存', 'green');
+    } catch(err) {
+      showToast('⚠️ 匯入失敗：' + err.message);
+    }
+  };
+  reader.readAsText(file);
+  event.target.value = '';  // 清空 input，允許重複匯入同一檔案
 }
 
 function showToast(msg, type) {
@@ -752,6 +792,10 @@ const fmtSign = (v) => (v >= 0 ? '+' : '') + Math.round(v).toLocaleString();
 
 function refreshAll() {
   const p = calcPortfolio();
+
+  // --- 範本提示橫幅
+  const isEmpty = p.holdingCount === 0 && p.cash === 0;
+  document.getElementById('templateBanner').style.display = isEmpty ? 'flex' : 'none';
 
   // --- 表頭資訊
   document.getElementById('lastUpdate').textContent = new Date().toLocaleString('zh-TW', { hour12: false });
