@@ -241,6 +241,24 @@
     <input type="file" id="importFile" accept="application/json,.json" style="display:none;" onchange="importJSON(event)">
   </div>
 
+  <!-- 第二排工具列：融資與目標設定 -->
+  <div class="toolbar" style="margin-top:-8px;">
+    <div class="field">
+      <label>💰 融資年利率 %</label>
+      <input type="number" id="marginRate" step="0.01" value="6.875">
+    </div>
+    <div class="field">
+      <label>🎯 年度目標 (TWD)</label>
+      <input type="number" id="annualTarget" step="10000" value="200000" style="width:120px;">
+    </div>
+    <div class="field">
+      <label>✅ 年初至今已實現</label>
+      <input type="number" id="realizedYTD" step="1000" value="0" style="width:120px;">
+    </div>
+    <div class="spacer"></div>
+    <span class="help-tag">融資/目標設定請在下方表格逐檔輸入</span>
+  </div>
+
   <!-- 範本提示橫幅（使用者第一次開啟時顯示） -->
   <div id="templateBanner" class="alert blue" style="margin-bottom: 18px; display:none;">
     <span class="icon">📋</span>
@@ -277,6 +295,31 @@
       <span class="label">最大單一持股</span>
       <span class="value" id="kpiMax">—</span>
       <span class="sub" id="kpiMaxSub">—</span>
+    </div>
+  </section>
+
+  <!-- 第二排 KPI：槓桿 + 目標 -->
+  <section class="grid grid-4" style="margin-bottom: 18px;">
+    <div class="card kpi">
+      <span class="label">💰 槓桿倍數</span>
+      <span class="value" id="kpiLeverage">—</span>
+      <span class="sub" id="kpiLeverageSub">—</span>
+    </div>
+    <div class="card kpi">
+      <span class="label">融資月利息</span>
+      <span class="value" id="kpiInterest">—</span>
+      <span class="sub" id="kpiInterestSub">—</span>
+    </div>
+    <div class="card kpi">
+      <span class="label">🎯 年度目標進度</span>
+      <span class="value" id="kpiTargetPct">—</span>
+      <div class="progress" style="margin-top:6px;"><div id="kpiTargetBar" style="width:0%; background:var(--green);"></div></div>
+      <span class="sub" id="kpiTargetSub">—</span>
+    </div>
+    <div class="card kpi">
+      <span class="label">預估全年實現</span>
+      <span class="value" id="kpiProjected">—</span>
+      <span class="sub" id="kpiProjectedSub">—</span>
     </div>
   </section>
 
@@ -335,6 +378,18 @@
       <div class="chart-wrap"><canvas id="barWeight"></canvas></div>
       <p style="font-size:11.5px; color: var(--text-2); margin-top: 8px;">黃線 = 單一個股 10% 警戒；紅線 = 30% 嚴重集中度紅線。</p>
     </div>
+  </section>
+
+  <!-- 💰 融資 / 槓桿總覽 -->
+  <section class="card" style="margin-bottom: 18px;">
+    <h2>💰 融資 / 槓桿狀況 <small>限台股；勾選後輸入融資金額即可追蹤維持率</small></h2>
+    <div id="marginContent"></div>
+  </section>
+
+  <!-- 🎯 年度目標追蹤 -->
+  <section class="card" style="margin-bottom: 18px;">
+    <h2>🎯 年度目標追蹤 <small>設定每檔個股的目標賣價，系統自動加總預期實現損益</small></h2>
+    <div id="targetContent"></div>
   </section>
 
   <!-- 個股 Investment Memo（動態） -->
@@ -416,6 +471,9 @@
 const DEFAULT_STATE = {
   fxRate: 31.425,
   cashTWD: 0,
+  marginRate: 6.875,        // 預設融資年利率 % (券商常見 6.5%-7%)
+  annualTarget: 200000,      // 年度淨賺目標 TWD
+  realizedYTD: 0,           // 年初至今已實現損益 TWD
   stocks: [
     {
       id: 'TW-2327', market: 'TW', symbol: '2327', name: '國巨*',
@@ -733,24 +791,73 @@ function showToast(msg, type) {
    3. 計算邏輯
    ============================================================ */
 
-function calcStock(s, fx) {
+function calcStock(s, fx, marginRate) {
   const rate = s.market === 'TW' ? 1 : fx;
   const marketValue = s.shares * s.price * rate;
   const costValue = s.shares * s.cost * rate;
   const pl = marketValue - costValue;
   const plPct = costValue > 0 ? pl / costValue * 100 : 0;
-  return { ...s, marketValueTWD: marketValue, costValueTWD: costValue, plTWD: pl, plPct };
+
+  // 融資相關（限台股）
+  const isMargin = !!(s.isMargin && s.market === 'TW');
+  const marginAmount = isMargin ? (s.marginAmount || 0) : 0;
+  const effectiveRate = (s.marginRateOverride != null ? s.marginRateOverride : marginRate) / 100;
+  const monthlyInterest = marginAmount * effectiveRate / 12;
+  const annualInterest = marginAmount * effectiveRate;
+  const selfFundedTWD = costValue - marginAmount;  // 自備款
+  const maintenanceRatio = marginAmount > 0 ? (marketValue / marginAmount * 100) : null;
+  const marginRiskLevel = (() => {
+    if (!isMargin || marginAmount === 0) return null;
+    if (maintenanceRatio >= 166) return 'safe';
+    if (maintenanceRatio >= 140) return 'caution';
+    if (maintenanceRatio >= 130) return 'warn';
+    return 'danger';  // 接近或低於斷頭線
+  })();
+
+  // 目標賣出（用原幣別計算後轉 TWD）
+  const tPrice = s.targetPrice || 0;
+  const tShares = s.targetShares || 0;
+  const targetProceedsTWD = tPrice * tShares * rate;
+  const targetCostTWD = s.cost * tShares * rate;
+  const targetProfitTWD = targetProceedsTWD - targetCostTWD;
+  const targetGapPct = (s.price > 0 && tPrice > 0) ? (tPrice - s.price) / s.price * 100 : null;
+
+  return {
+    ...s,
+    marketValueTWD: marketValue, costValueTWD: costValue, plTWD: pl, plPct,
+    isMargin, marginAmount, monthlyInterest, annualInterest, selfFundedTWD,
+    maintenanceRatio, marginRiskLevel, effectiveRatePct: effectiveRate * 100,
+    targetProfitTWD, targetGapPct, targetProceedsTWD
+  };
 }
 
 function calcPortfolio() {
   const fx = STATE.fxRate;
   const cash = STATE.cashTWD;
-  const stocks = STATE.stocks.map(s => calcStock(s, fx));
+  const marginRate = STATE.marginRate || 6.875;
+  const annualTarget = STATE.annualTarget || 0;
+  const realizedYTD = STATE.realizedYTD || 0;
+  const stocks = STATE.stocks.map(s => calcStock(s, fx, marginRate));
   const equity = stocks.reduce((sum, s) => sum + s.marketValueTWD, 0);
   const total = equity + cash;
   const totalCost = stocks.reduce((sum, s) => sum + s.costValueTWD, 0);
   const totalPL = equity - totalCost;
   const totalPLPct = totalCost > 0 ? totalPL / totalCost * 100 : 0;
+
+  // 融資加總
+  const totalMargin = stocks.reduce((sum, s) => sum + (s.marginAmount || 0), 0);
+  const totalSelfFunded = totalCost - totalMargin;
+  const monthlyInterestTotal = stocks.reduce((sum, s) => sum + s.monthlyInterest, 0);
+  const annualInterestTotal = stocks.reduce((sum, s) => sum + s.annualInterest, 0);
+  const leverage = totalSelfFunded > 0 ? totalCost / totalSelfFunded : 1;
+  const marginCount = stocks.filter(s => s.isMargin && s.marginAmount > 0).length;
+
+  // 目標加總
+  const projectedRealized = stocks.reduce((sum, s) => sum + s.targetProfitTWD, 0);
+  const targetTotal = realizedYTD + projectedRealized;
+  const targetGap = annualTarget - targetTotal;
+  const targetProgress = annualTarget > 0 ? targetTotal / annualTarget * 100 : 0;
+  const realizedProgress = annualTarget > 0 ? realizedYTD / annualTarget * 100 : 0;
 
   // 加權重
   const stocksWithWeight = stocks.map(s => ({
@@ -778,7 +885,12 @@ function calcPortfolio() {
     maxStock, usdEquity, twEquity, sectorMap,
     cashRatio: total > 0 ? cash / total * 100 : 0,
     holdingCount: stocksWithWeight.filter(s => s.shares > 0).length,
-    watchCount: stocksWithWeight.filter(s => s.shares === 0).length
+    watchCount: stocksWithWeight.filter(s => s.shares === 0).length,
+    // 融資 / 目標
+    totalMargin, totalSelfFunded, monthlyInterestTotal, annualInterestTotal,
+    leverage, marginCount,
+    annualTarget, realizedYTD, projectedRealized, targetTotal, targetGap,
+    targetProgress, realizedProgress
   };
 }
 
@@ -824,6 +936,43 @@ function refreshAll() {
     document.getElementById('kpiMaxSub').textContent = '—';
   }
 
+  // --- 第二排 KPI：槓桿 + 目標
+  const levEl = document.getElementById('kpiLeverage');
+  if (p.totalMargin > 0) {
+    levEl.textContent = p.leverage.toFixed(2) + 'x';
+    levEl.className = 'value ' + (p.leverage > 2 ? 'neg' : (p.leverage > 1.5 ? 'warn' : 'pos'));
+    document.getElementById('kpiLeverageSub').textContent = `融資 ${fmtTWD(p.totalMargin)} / 自備 ${fmtTWD(p.totalSelfFunded)}`;
+  } else {
+    levEl.textContent = '1.00x';
+    levEl.className = 'value';
+    document.getElementById('kpiLeverageSub').textContent = '無融資 · 純現股';
+  }
+
+  document.getElementById('kpiInterest').textContent = fmtTWD(p.monthlyInterestTotal);
+  document.getElementById('kpiInterestSub').textContent = `年化 ${fmtTWD(p.annualInterestTotal)} · ${p.marginCount} 檔融資中`;
+
+  const tProgEl = document.getElementById('kpiTargetPct');
+  if (p.annualTarget > 0) {
+    tProgEl.textContent = p.targetProgress.toFixed(0) + '%';
+    tProgEl.className = 'value ' + (p.targetProgress >= 100 ? 'pos' : (p.targetProgress >= 50 ? 'info' : 'warn'));
+  } else {
+    tProgEl.textContent = '—';
+    tProgEl.className = 'value';
+  }
+  const tBar = document.getElementById('kpiTargetBar');
+  tBar.style.width = Math.min(Math.max(p.targetProgress, 0), 100) + '%';
+  tBar.style.background = p.targetProgress >= 100 ? 'var(--green)' : (p.targetProgress >= 50 ? 'var(--accent)' : 'var(--amber)');
+  document.getElementById('kpiTargetSub').textContent = p.annualTarget > 0
+    ? `目標 ${fmtTWD(p.annualTarget)} · 實現 ${p.realizedProgress.toFixed(0)}%`
+    : '請設定年度目標';
+
+  document.getElementById('kpiProjected').textContent = fmtTWD(p.targetTotal);
+  document.getElementById('kpiProjectedSub').innerHTML = p.annualTarget > 0
+    ? (p.targetGap > 0
+        ? `<span class="warn">缺口 ${fmtTWD(p.targetGap)}</span>`
+        : `<span class="pos">超標 ${fmtTWD(-p.targetGap)}</span>`)
+    : '已實現 + 目標賣出總和';
+
   // --- 警報
   renderAlerts(p);
 
@@ -838,6 +987,10 @@ function refreshAll() {
   renderGeoBars(p);
   renderBarWeight(p);
 
+  // --- 融資與目標
+  renderMargin(p);
+  renderTarget(p);
+
   // --- 個股 memo
   renderMemos(p);
 
@@ -846,6 +999,219 @@ function refreshAll() {
 
   // --- 壓力測試
   renderStress(p);
+}
+
+/* ----- 融資 / 槓桿區塊 ----- */
+function renderMargin(p) {
+  const twStocks = p.stocks.filter(s => s.market === 'TW' && s.shares > 0);
+  if (twStocks.length === 0) {
+    document.getElementById('marginContent').innerHTML = `<p style="color:var(--text-2); font-size:13px; padding:8px 0;">尚無台股部位。融資功能僅適用於台股集中保管交易，請先在持股表格輸入台股部位。</p>`;
+    return;
+  }
+
+  // 警示
+  const dangerStocks = twStocks.filter(s => s.maintenanceRatio !== null && s.maintenanceRatio < 140);
+  let alertHtml = '';
+  if (dangerStocks.length > 0) {
+    alertHtml = `<div class="alert ${dangerStocks.some(s => s.maintenanceRatio < 130) ? '' : 'amber'}" style="margin-bottom:14px;">
+      <span class="icon">${dangerStocks.some(s => s.maintenanceRatio < 130) ? '🚨' : '⚠️'}</span>
+      <div class="body">
+        <b>${dangerStocks.length} 檔個股維持率偏低，注意追繳/斷頭風險</b>
+        <p>${dangerStocks.map(s => `${s.symbol} ${s.name} 維持率 ${s.maintenanceRatio.toFixed(0)}%`).join('、')}。台股一般 130% 以下會收到追繳通知，130% 維持 2 個交易日未補繳即被斷頭。</p>
+      </div>
+    </div>`;
+  }
+
+  // 摘要 KPI
+  const summaryHtml = p.totalMargin > 0 ? `
+    <div class="grid grid-4" style="margin-bottom:14px;">
+      <div class="card kpi" style="padding:12px;"><span class="label">總融資餘額</span><span class="value" style="font-size:18px;">${fmtTWD(p.totalMargin)}</span></div>
+      <div class="card kpi" style="padding:12px;"><span class="label">總自備款</span><span class="value" style="font-size:18px;">${fmtTWD(p.totalSelfFunded)}</span></div>
+      <div class="card kpi" style="padding:12px;"><span class="label">月利息支出</span><span class="value warn" style="font-size:18px;">${fmtTWD(p.monthlyInterestTotal)}</span><span class="sub">年化 ${fmtTWD(p.annualInterestTotal)}</span></div>
+      <div class="card kpi" style="padding:12px;"><span class="label">利息侵蝕率</span><span class="value" style="font-size:18px;">${p.totalPL > 0 ? (p.annualInterestTotal / p.totalPL * 100).toFixed(0) + '%' : '—'}</span><span class="sub">年利息 / 未實現損益</span></div>
+    </div>
+  ` : '';
+
+  // 個股表
+  const tableHtml = `
+    <div style="overflow-x:auto;">
+    <table>
+      <thead>
+        <tr>
+          <th>代號</th><th>名稱</th>
+          <th class="num" style="width:60px;">融資</th>
+          <th class="num" style="width:120px;">融資金額</th>
+          <th class="num" style="width:80px;">利率%</th>
+          <th class="num">維持率</th>
+          <th class="num">月利息</th>
+          <th class="num">自備款</th>
+          <th class="num">含息實質報酬</th>
+        </tr>
+      </thead>
+      <tbody>
+      ${twStocks.map(s => {
+        const riskColors = { safe: 'pos', caution: '', warn: 'warn', danger: 'neg' };
+        const riskLabels = { safe: '🟢 健康', caution: '🟡 注意', warn: '🟠 警戒', danger: '🔴 追繳' };
+        const ratioCls = s.marginRiskLevel ? riskColors[s.marginRiskLevel] : '';
+        const ratioLabel = s.marginRiskLevel ? riskLabels[s.marginRiskLevel] : '';
+        const realReturn = s.selfFundedTWD > 0 ? ((s.plTWD - s.annualInterest) / s.selfFundedTWD * 100) : 0;
+        return `
+        <tr data-id="${s.id}">
+          <td><b>${s.symbol}</b></td><td>${s.name}</td>
+          <td class="num"><input type="checkbox" class="margin-toggle" data-id="${s.id}" ${s.isMargin ? 'checked' : ''}></td>
+          <td class="num"><input class="cell" type="number" data-margin-id="${s.id}" data-field="marginAmount" value="${s.marginAmount || 0}" step="1000" ${!s.isMargin ? 'disabled style="opacity:0.4"' : ''}></td>
+          <td class="num"><input class="cell" type="number" data-margin-id="${s.id}" data-field="marginRateOverride" value="${s.marginRateOverride != null ? s.marginRateOverride : ''}" step="0.01" placeholder="${(STATE.marginRate || 6.875).toFixed(2)}" ${!s.isMargin ? 'disabled style="opacity:0.4"' : ''}></td>
+          <td class="num ${ratioCls}">${s.maintenanceRatio !== null ? s.maintenanceRatio.toFixed(0) + '% ' + ratioLabel : '—'}</td>
+          <td class="num">${s.monthlyInterest > 0 ? fmtTWD(s.monthlyInterest) : '—'}</td>
+          <td class="num">${s.isMargin ? fmtTWD(s.selfFundedTWD) : '—'}</td>
+          <td class="num ${realReturn >= 0 ? 'pos' : 'neg'}">${s.isMargin && s.selfFundedTWD > 0 ? fmtPct(realReturn) : '—'}</td>
+        </tr>
+        `;
+      }).join('')}
+      </tbody>
+    </table>
+    </div>
+    <p style="margin-top:10px; font-size:11.5px; color:var(--text-2);">
+      💡 <b>名詞解釋：</b>
+      <b>維持率</b> = 個股市值 / 融資金額 × 100%；<b>追繳線</b> 130%；<b>含息實質報酬</b> = (損益 - 年化利息) / 自備款，反映扣除利息成本後的真實報酬率。
+    </p>
+  `;
+
+  document.getElementById('marginContent').innerHTML = alertHtml + summaryHtml + tableHtml;
+
+  // 綁定事件
+  document.querySelectorAll('.margin-toggle').forEach(cb => {
+    cb.addEventListener('change', e => {
+      const id = e.target.dataset.id;
+      const stock = STATE.stocks.find(s => s.id === id);
+      if (stock) {
+        stock.isMargin = e.target.checked;
+        if (!stock.isMargin) { stock.marginAmount = 0; stock.marginRateOverride = null; }
+        refreshAll();
+      }
+    });
+  });
+  document.querySelectorAll('input[data-margin-id]').forEach(input => {
+    input.addEventListener('input', e => {
+      const id = e.target.dataset.marginId;
+      const field = e.target.dataset.field;
+      const val = e.target.value === '' ? null : parseFloat(e.target.value);
+      const stock = STATE.stocks.find(s => s.id === id);
+      if (stock) {
+        stock[field] = val == null ? null : (isNaN(val) ? 0 : val);
+        refreshAll();
+        // 還原焦點
+        setTimeout(() => {
+          const ne = document.querySelector(`input[data-margin-id="${id}"][data-field="${field}"]`);
+          if (ne) { ne.focus(); ne.setSelectionRange(ne.value.length, ne.value.length); }
+        }, 0);
+      }
+    });
+  });
+}
+
+/* ----- 目標賣價區塊 ----- */
+function renderTarget(p) {
+  const heldStocks = p.stocks.filter(s => s.shares > 0);
+  if (heldStocks.length === 0) {
+    document.getElementById('targetContent').innerHTML = `<p style="color:var(--text-2); font-size:13px; padding:8px 0;">尚無持股部位，無法設定目標賣價。請先在持股表格輸入部位。</p>`;
+    return;
+  }
+
+  // 進度條 + 摘要
+  const progressHtml = `
+    <div class="card kpi" style="background:var(--bg-2); margin-bottom:14px; padding:14px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <div>
+          <div style="color:var(--text-1); font-size:11px; text-transform:uppercase; letter-spacing:1px;">年度目標進度</div>
+          <div style="font-size:22px; font-weight:600; margin-top:4px;">${fmtTWD(p.targetTotal)} / ${fmtTWD(p.annualTarget)} <span style="font-size:14px; color:${p.targetProgress >= 100 ? 'var(--green)' : 'var(--amber)'};">${p.annualTarget > 0 ? p.targetProgress.toFixed(1) : 0}%</span></div>
+        </div>
+        <div style="text-align:right;">
+          <div style="color:var(--text-1); font-size:11px;">缺口</div>
+          <div style="font-size:18px; font-weight:600; color:${p.targetGap > 0 ? 'var(--amber)' : 'var(--green)'};">
+            ${p.targetGap > 0 ? '尚需 ' + fmtTWD(p.targetGap) : '已超標 ' + fmtTWD(-p.targetGap)}
+          </div>
+        </div>
+      </div>
+      <div style="height:14px; background:var(--bg-3); border-radius:7px; overflow:hidden; position:relative;">
+        <div style="height:100%; width:${Math.min(p.realizedProgress, 100)}%; background:var(--green); position:absolute; left:0; top:0;"></div>
+        <div style="height:100%; width:${Math.min(Math.max(p.targetProgress - p.realizedProgress, 0), 100 - Math.min(p.realizedProgress, 100))}%; background:var(--accent); position:absolute; left:${Math.min(p.realizedProgress, 100)}%; top:0;"></div>
+      </div>
+      <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--text-1); margin-top:6px;">
+        <span><span style="display:inline-block; width:8px; height:8px; background:var(--green); border-radius:2px; margin-right:4px;"></span>已實現 ${fmtTWD(p.realizedYTD)}</span>
+        <span><span style="display:inline-block; width:8px; height:8px; background:var(--accent); border-radius:2px; margin-right:4px;"></span>預期實現 ${fmtTWD(p.projectedRealized)}</span>
+        <span><span style="display:inline-block; width:8px; height:8px; background:var(--bg-3); border-radius:2px; margin-right:4px;"></span>缺口</span>
+      </div>
+    </div>
+  `;
+
+  // 個股目標表
+  const tableHtml = `
+    <div style="overflow-x:auto;">
+    <table>
+      <thead>
+        <tr>
+          <th>代號</th><th>名稱</th>
+          <th class="num">現價</th>
+          <th class="num" style="width:100px;">目標賣價</th>
+          <th class="num" style="width:90px;">賣出股數</th>
+          <th class="num">目標漲幅</th>
+          <th class="num">每股獲利</th>
+          <th class="num">預期實現 (TWD)</th>
+        </tr>
+      </thead>
+      <tbody>
+      ${heldStocks.map(s => {
+        const sym = s.market === 'US' ? '$' : '';
+        const tPrice = s.targetPrice || 0;
+        const tShares = s.targetShares || 0;
+        const profitPerShare = tPrice > 0 ? tPrice - s.cost : 0;
+        return `
+        <tr data-id="${s.id}">
+          <td><b>${s.symbol}</b></td><td>${s.name}</td>
+          <td class="num">${sym}${s.price < 100 ? s.price.toFixed(2) : Math.round(s.price).toLocaleString()}</td>
+          <td class="num"><input class="cell" type="number" data-target-id="${s.id}" data-field="targetPrice" value="${tPrice || ''}" step="0.5" placeholder="—"></td>
+          <td class="num"><input class="cell" type="number" data-target-id="${s.id}" data-field="targetShares" value="${tShares || ''}" step="1" placeholder="—" max="${s.shares}"></td>
+          <td class="num ${s.targetGapPct > 0 ? 'pos' : (s.targetGapPct < 0 ? 'neg' : '')}">${s.targetGapPct !== null ? fmtPct(s.targetGapPct) : '—'}</td>
+          <td class="num ${profitPerShare > 0 ? 'pos' : (profitPerShare < 0 ? 'neg' : '')}">${tPrice > 0 ? sym + (Math.abs(profitPerShare) < 100 ? profitPerShare.toFixed(2) : Math.round(profitPerShare).toLocaleString()) : '—'}</td>
+          <td class="num ${s.targetProfitTWD > 0 ? 'pos' : (s.targetProfitTWD < 0 ? 'neg' : '')}">${tPrice > 0 && tShares > 0 ? fmtSign(s.targetProfitTWD) : '—'}</td>
+        </tr>
+        `;
+      }).join('')}
+      </tbody>
+      <tfoot>
+        <tr style="font-weight:600; background: var(--bg-2);">
+          <td colspan="7">📊 預期實現損益總和</td>
+          <td class="num ${p.projectedRealized >= 0 ? 'pos' : 'neg'}">${fmtSign(p.projectedRealized)}</td>
+        </tr>
+      </tfoot>
+    </table>
+    </div>
+    <p style="margin-top:10px; font-size:11.5px; color:var(--text-2);">
+      💡 <b>使用方式：</b>輸入每檔股票您希望賣出的目標價與股數，系統會自動換算到台幣並加總，與年初已實現損益相加，看是否能達成年度目標。<br>
+      🎯 <b>缺口策略：</b>若有缺口，可考慮 (1) 調高目標賣價 (2) 增加賣出股數 (3) 加碼新標的 (4) 重新檢視年度目標是否合理。
+    </p>
+  `;
+
+  document.getElementById('targetContent').innerHTML = progressHtml + tableHtml;
+
+  // 綁定事件
+  document.querySelectorAll('input[data-target-id]').forEach(input => {
+    input.addEventListener('input', e => {
+      const id = e.target.dataset.targetId;
+      const field = e.target.dataset.field;
+      const val = parseFloat(e.target.value) || 0;
+      const stock = STATE.stocks.find(s => s.id === id);
+      if (stock) {
+        stock[field] = val;
+        refreshAll();
+        setTimeout(() => {
+          const ne = document.querySelector(`input[data-target-id="${id}"][data-field="${field}"]`);
+          if (ne) { ne.focus(); ne.setSelectionRange(ne.value.length, ne.value.length); }
+        }, 0);
+      }
+    });
+  });
 }
 
 /* ----- 警報區 ----- */
@@ -1319,14 +1685,34 @@ document.getElementById('cashTWD').addEventListener('input', (e) => {
   STATE.cashTWD = parseFloat(e.target.value) || 0;
   refreshAll();
 });
+// 融資與目標設定
+document.getElementById('marginRate').addEventListener('input', (e) => {
+  STATE.marginRate = parseFloat(e.target.value) || 6.875;
+  refreshAll();
+});
+document.getElementById('annualTarget').addEventListener('input', (e) => {
+  STATE.annualTarget = parseFloat(e.target.value) || 0;
+  refreshAll();
+});
+document.getElementById('realizedYTD').addEventListener('input', (e) => {
+  STATE.realizedYTD = parseFloat(e.target.value) || 0;
+  refreshAll();
+});
 
 // 自動嘗試從 localStorage 載入
 const saved = localStorage.getItem(STORAGE_KEY);
 if (saved) {
   try {
     STATE = JSON.parse(saved);
+    // 補齊舊版 STATE 缺少的欄位
+    STATE.marginRate = STATE.marginRate ?? 6.875;
+    STATE.annualTarget = STATE.annualTarget ?? 200000;
+    STATE.realizedYTD = STATE.realizedYTD ?? 0;
     document.getElementById('fxRate').value = STATE.fxRate;
     document.getElementById('cashTWD').value = STATE.cashTWD;
+    document.getElementById('marginRate').value = STATE.marginRate;
+    document.getElementById('annualTarget').value = STATE.annualTarget;
+    document.getElementById('realizedYTD').value = STATE.realizedYTD;
   } catch(e) { /* fallback to default */ }
 }
 
